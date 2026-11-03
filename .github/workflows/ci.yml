@@ -69,3 +69,47 @@ jobs:
       - uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.12.2
+
+  helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.15.0
+      - name: Helm lint (standalone mode)
+        run: helm lint deploy/helm/sorolens --set database.url=postgres://user:pass@host:5432/sorolens
+      - name: Helm lint (upstream mode)
+        run: |
+          helm lint deploy/helm/sorolens \
+            --set config.sourceMode=sorotrail \
+            --set config.sorotrailUrl=http://sorotrail:8080
+      - name: Helm lint (invalid value — schema must reject)
+        run: |
+          if helm lint deploy/helm/sorolens --set database.url=postgres://user:pass@host:5432/sorolens --set replicaCount=not-a-number; then
+            echo "::error::Schema validation did not reject invalid replicaCount"
+            exit 1
+          fi
+      - name: Helm lint (unknown value — schema must reject)
+        run: |
+          if helm lint deploy/helm/sorolens --set database.url=postgres://user:pass@host:5432/sorolens --set replicaCont=2; then
+            echo "::error::Schema validation did not reject unknown value replicaCont"
+            exit 1
+          fi
+      - name: Helm template render (standalone mode)
+        run: helm template sorolens deploy/helm/sorolens --set database.url=postgres://user:pass@host:5432/sorolens > /dev/null
+      - name: Helm template render (upstream mode)
+        run: |
+          helm template sorolens deploy/helm/sorolens \
+            --set config.sourceMode=sorotrail \
+            --set config.sorotrailUrl=http://sorotrail:8080 \
+            > /dev/null
+      - name: Helm chart golden tests
+        env:
+          SOROLENS_REQUIRE_HELM: "1"
+        run: go test ./deploy/helm/sorolens/... -count=1

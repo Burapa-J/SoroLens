@@ -1,0 +1,191 @@
+---
+# Source: sorolens/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sorolens
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sorolens
+      app.kubernetes.io/instance: sorolens
+---
+# Source: sorolens/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sorolens-runner
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: false
+---
+# Source: sorolens/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sorolens-config
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+data:
+  SOURCE_MODE: "rpc"
+  HTTP_ADDR: ":8080"
+  LOG_LEVEL: "warn"
+  CORS_ALLOWED_ORIGINS: "https://app.example.com"
+  NETWORK: "mainnet"
+  RPC_URL: "https://soroban-mainnet.example.com"
+  POLL_INTERVAL: "10s"
+  RETENTION_LEDGERS: "34560"
+  WATCHED_CONTRACTS: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+  START_LEDGER: "1000"
+---
+# Source: sorolens/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: sorolens
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+---
+# Source: sorolens/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sorolens
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sorolens
+      app.kubernetes.io/instance: sorolens
+  template:
+    metadata:
+      annotations:
+        checksum/config: 4f1940d375d7e4cd603c528ceb9227cc788ac2718819af4afc89af3fcfbb8209
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/name: sorolens
+        app.kubernetes.io/instance: sorolens
+    spec:
+      serviceAccountName: sorolens-runner
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: sorolens
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          image: "ghcr.io/sorotrail/sorolens:0.1.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sorolens-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: existing-db-secret
+                  key: DATABASE_URL
+          # Startup probe gives the process up to 30s to connect to Postgres,
+          # run migrations (in standalone mode), and bind the HTTP listener.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 15
+          # Liveness probe restarts the container if the HTTP listener deadlocks.
+          # Targets /livez (matches Dockerfile HEALTHCHECK).
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness probe removes the pod from the Service if Postgres / RPC
+          # (standalone mode) or the upstream SoroTrail API (sorotrail mode) is
+          # unreachable, so traffic only hits healthy instances.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+---
+# Source: sorolens/templates/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sorolens
+  labels:
+    helm.sh/chart: sorolens-0.1.0
+    app.kubernetes.io/name: sorolens
+    app.kubernetes.io/instance: sorolens
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sorolens
+      app.kubernetes.io/instance: sorolens
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

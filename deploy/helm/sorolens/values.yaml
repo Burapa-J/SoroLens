@@ -1,0 +1,134 @@
+# Default values for sorolens.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/sorotrail/sorolens
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created.
+  create: true
+  # Annotations to add to the service account.
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+podAnnotations: {}
+
+# Security context matches the non-root UID 10001 created in the Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+resources: {}
+  # Recommend setting requests and limits in production:
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # limits:
+  #   cpu: 500m
+  #   memory: 256Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# PodDisruptionBudget — protects availability during voluntary disruptions
+# (node drains, cluster upgrades). Enable when running multiple replicas.
+pdb:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Application configuration — maps 1:1 to internal/config environment variables
+# via a ConfigMap. Settings that apply only to one operating mode (config.sourceMode)
+# are neither required nor rendered when deploying in the other mode.
+config:
+  # Event source mode: "rpc" (standalone, polls Stellar RPC into PostgreSQL)
+  # or "sorotrail" (upstream, reads from an existing SoroTrail HTTP API).
+  sourceMode: "rpc"
+
+  # Upstream SoroTrail base URL (required when sourceMode is "sorotrail";
+  # ignored and omitted when sourceMode is "rpc").
+  sorotrailUrl: ""
+
+  # Stellar network preset for standalone ("rpc") mode:
+  # "testnet", "mainnet", "futurenet", or "custom".
+  network: "testnet"
+
+  # Stellar Soroban JSON-RPC 2.0 endpoint for standalone ("rpc") mode.
+  rpcUrl: "https://soroban-testnet.stellar.org"
+
+  # Stellar network passphrase override (required only when network is "custom").
+  networkPassphrase: ""
+
+  # How often to poll Stellar RPC for new events once caught up (Go duration).
+  pollInterval: "5s"
+
+  # HTTP listen address for the web dashboard, JSON API, health probes, and /metrics.
+  httpAddr: ":8080"
+
+  # Comma-separated contract IDs (C...) to index in standalone mode. Empty = all.
+  watchedContracts: ""
+
+  # Force standalone ingestion to start from this ledger sequence number on cold start.
+  startLedger: ""
+
+  # Cold-start reach-back in ledgers (~24h at 5s/ledger) for standalone mode.
+  retentionLedgers: "17280"
+
+  # Log verbosity: debug, info, warn, error.
+  logLevel: "info"
+
+  # Comma-separated browser origins allowed to call /api/* cross-origin. Empty = disabled.
+  corsAllowedOrigins: ""
+
+# Database connection — standalone ("rpc") mode requires an external PostgreSQL
+# instance (e.g. CloudNativePG, RDS, Cloud SQL). Ignored and omitted when
+# config.sourceMode is "sorotrail".
+database:
+  # Name of an existing Kubernetes Secret that contains the DATABASE_URL key.
+  # When set, the chart does not create a Secret of its own.
+  existingSecret: ""
+  # Key within the existing Secret that holds the connection string.
+  existingSecretKey: DATABASE_URL
+  # Inline connection string used when existingSecret is empty. Stored in a
+  # chart-managed Secret; required in standalone ("rpc") mode when existingSecret is empty.
+  url: ""
+
+# Prometheus ServiceMonitor (requires prometheus-operator CRDs in the cluster).
+serviceMonitor:
+  enabled: false
+  # Namespace where the ServiceMonitor is created (defaults to release namespace).
+  namespace: ""
+  # Additional labels so your Prometheus instance's serviceMonitorSelector matches.
+  additionalLabels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics

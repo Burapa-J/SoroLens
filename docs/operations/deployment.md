@@ -21,6 +21,24 @@ HTTP_ADDR=:8080
 
 This is the lighter deployment: one process, no database, no ingestion loop of its own. If you already run SoroTrail in production, running SoroLens alongside it in upstream mode is usually the simpler choice.
 
+## Kubernetes (Helm)
+
+A Helm chart lives at [`deploy/helm/sorolens/`](../../deploy/helm/sorolens/README.md) and supports both operating modes:
+
+```bash
+# Standalone mode (with an external PostgreSQL database):
+helm install sorolens ./deploy/helm/sorolens \
+  --set database.url="postgres://user:pass@host:5432/sorolens?sslmode=require" \
+  --set config.network="testnet"
+
+# Upstream mode (reading from an existing SoroTrail HTTP API):
+helm install sorolens ./deploy/helm/sorolens \
+  --set config.sourceMode="sorotrail" \
+  --set config.sorotrailUrl="http://sorotrail.default.svc.cluster.local:8080"
+```
+
+See [`deploy/helm/sorolens/README.md`](../../deploy/helm/sorolens/README.md) for the full values reference, existing-Secret wiring, `ServiceMonitor`, and `PodDisruptionBudget` options.
+
 ## Standalone mode operational notes
 
 If you do run standalone mode, the same continuity consideration applies as any RPC-polling ingester: downtime beyond the RPC's retention window means a permanent gap in what SoroLens captured for that period. If continuous, gap-free history matters to you, prefer upstream mode against a SoroTrail instance that's already handling that concern.
