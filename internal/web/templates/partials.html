@@ -107,3 +107,57 @@
 </div>
 {{end}}
 {{end}}
+
+
+{{/* contracts-table renders one page of contracts and its pagination controls.
+     The full /contracts page embeds it and links through query-string URLs so
+     every page is bookmarkable and works with the browser back button;
+     /partials/contracts serves the same fragment on its own. */}}
+{{define "contracts-table"}}
+{{if .Contracts}}
+<div class="scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>Contract</th>
+        <th>Events</th>
+        <th>First ledger</th>
+        <th>Last ledger</th>
+        <th>Last activity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Contracts}}
+      <tr>
+        <td><a class="mono" href="/contracts/{{.ID}}" title="{{.ID}}">{{shorten .ID 10}}</a></td>
+        <td class="num">{{.EventCount}}</td>
+        <td class="num">{{.FirstLedger}}</td>
+        <td class="num">{{.LastLedger}}</td>
+        <td>{{if .LastActivity.IsZero}}<span class="muted">unknown</span>{{else}}{{.LastActivity.UTC.Format "2006-01-02 15:04:05Z"}}{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+
+{{if .NextURL}}
+<p class="muted">Showing {{len .Contracts}} contracts on this page — more contracts match this view.</p>
+{{else if .Cursor}}
+<p class="muted">Showing {{len .Contracts}} contracts on the final page of results.</p>
+{{end}}
+
+{{if or .Cursor .NextURL}}
+<nav aria-label="Contracts pagination" class="filters">
+  {{if .Cursor}}<a href="{{.FirstURL}}" rel="first">← First page</a>{{end}}
+  {{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next page →</a>{{end}}
+</nav>
+{{end}}
+
+{{else}}
+<div class="empty">
+  <p>No contracts to show{{if .Search}} for “{{.Search}}”{{end}}.</p>
+  <p class="muted">Standalone mode only sees contracts that emitted events while SoroLens was running.</p>
+  {{if .Cursor}}<p><a href="{{.FirstURL}}" rel="first">← First page</a></p>{{end}}
+</div>
+{{end}}
+{{end}}

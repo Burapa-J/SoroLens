@@ -81,9 +81,11 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/events/{id}", s.event)
 	r.Get("/search", s.search)
 
-	// htmx fragment endpoints: these return just an events table, so filtering
-	// and paging swap in place instead of reloading the page.
+	// htmx fragment endpoints: these return just a table fragment, so filtering
+	// and paging can swap in place when driven via htmx while full pages stay
+	// linkable via query-string URLs.
 	r.Get("/partials/events", s.partialEvents)
+	r.Get("/partials/contracts", s.partialContracts)
 
 	r.NotFound(s.notFound)
 	return r
@@ -260,6 +262,21 @@ func looksLikeEventID(s string) bool {
 var errNotFound = source.ErrNotFound
 
 func isNotFound(err error) bool { return errors.Is(err, errNotFound) }
+
+func isInvalidCursor(err error) bool {
+	return err != nil && (errors.Is(err, source.ErrInvalidCursor) || strings.Contains(err.Error(), "invalid cursor"))
+}
+
+// contractQueryFromRequest reuses the API's parser and clamps the page size
+// through source.NormalizeLimit so the UI and the API enforce identical bounds.
+func contractQueryFromRequest(r *http.Request) (source.ContractQuery, error) {
+	q, err := api.ContractQueryFromRequest(r)
+	if err != nil {
+		return q, err
+	}
+	q.Limit = source.NormalizeLimit(q.Limit)
+	return q, nil
+}
 
 // eventQueryFromRequest reuses the API's parser so the UI and the API accept
 // exactly the same filters.

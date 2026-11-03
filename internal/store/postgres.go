@@ -371,15 +371,15 @@ func encodeContractCursor(ledger int64, contractID string) string {
 func decodeContractCursor(cursor string) (int64, string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return 0, "", fmt.Errorf("invalid cursor")
+		return 0, "", source.ErrInvalidCursor
 	}
 	ledgerStr, contractID, ok := strings.Cut(string(raw), "|")
-	if !ok {
-		return 0, "", fmt.Errorf("invalid cursor")
+	if !ok || contractID == "" {
+		return 0, "", source.ErrInvalidCursor
 	}
 	ledger, err := strconv.ParseInt(ledgerStr, 10, 64)
-	if err != nil {
-		return 0, "", fmt.Errorf("invalid cursor")
+	if err != nil || ledger < 0 {
+		return 0, "", source.ErrInvalidCursor
 	}
 	return ledger, contractID, nil
 }

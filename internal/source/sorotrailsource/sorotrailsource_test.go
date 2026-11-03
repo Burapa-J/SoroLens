@@ -381,6 +381,55 @@ func TestListContractsSearchAndPaging(t *testing.T) {
 		}
 		assert.Len(t, seen, 5)
 	})
+
+	t.Run("filtered list pages without losing the filter", func(t *testing.T) {
+		page1, err := src.ListContracts(context.Background(), source.ContractQuery{Search: "contract", Limit: 2})
+		require.NoError(t, err)
+		require.Len(t, page1.Contracts, 2)
+		require.NotEmpty(t, page1.NextCursor)
+
+		page2, err := src.ListContracts(context.Background(), source.ContractQuery{Search: "contract", Limit: 2, Cursor: page1.NextCursor})
+		require.NoError(t, err)
+		require.Len(t, page2.Contracts, 2)
+		assert.NotEqual(t, page1.Contracts[0].ID, page2.Contracts[0].ID)
+		assert.NotEqual(t, page1.Contracts[1].ID, page2.Contracts[0].ID)
+	})
+
+	t.Run("cache refresh between pages does not shift the cursor or repeat contracts", func(t *testing.T) {
+		page1, err := src.ListContracts(context.Background(), source.ContractQuery{Limit: 2})
+		require.NoError(t, err)
+		require.Len(t, page1.Contracts, 2)
+		require.NotEmpty(t, page1.NextCursor)
+
+		// Simulate a cache refresh that adds a brand-new contract at the head
+		// of the list before page 2 is requested.
+		f := src.api.(*fakeIndexer)
+		f.mu.Lock()
+		f.events = append(f.events, makeEvents(1, 9000, "CONTRACT_NEW")...)
+		f.mu.Unlock()
+		src.mu.Lock()
+		src.cachedAt = time.Time{}
+		src.mu.Unlock()
+
+		page2, err := src.ListContracts(context.Background(), source.ContractQuery{Limit: 2, Cursor: page1.NextCursor})
+		require.NoError(t, err)
+		for _, c := range page2.Contracts {
+			assert.NotEqual(t, page1.Contracts[0].ID, c.ID, "page 1 head repeated after cache refresh")
+			assert.NotEqual(t, page1.Contracts[1].ID, c.ID, "page 1 tail repeated after cache refresh")
+		}
+	})
+
+	t.Run("invalid and cross-mode cursors are rejected", func(t *testing.T) {
+		for _, bad := range []string{
+			"!!!not-base64!!!",
+			encodeCursor("", 2),
+			encodeCursor("0000000100-0000000001", 100),
+			"MTAwMHxDQkJC", // base64("1000|CBBB") from standalone Postgres mode
+		} {
+			_, err := src.ListContracts(context.Background(), source.ContractQuery{Cursor: bad})
+			require.ErrorIs(t, err, source.ErrInvalidCursor, "cursor %q should be rejected", bad)
+		}
+	})
 }
 
 func TestContractListIsCached(t *testing.T) {

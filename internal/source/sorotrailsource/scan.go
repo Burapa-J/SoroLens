@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sorotrail/sorolens/internal/source"
@@ -169,15 +170,28 @@ func encodeCursor(beforeID string, resumeLedger int64) string {
 func decodeCursor(cursor string) (beforeID string, resumeLedger int64, err error) {
 	raw, decErr := base64.RawURLEncoding.DecodeString(cursor)
 	if decErr != nil {
-		return "", 0, fmt.Errorf("invalid cursor")
+		return "", 0, source.ErrInvalidCursor
 	}
 	id, ledgerStr, ok := strings.Cut(string(raw), "|")
-	if !ok {
-		return "", 0, fmt.Errorf("invalid cursor")
+	if !ok || ledgerStr == "" {
+		return "", 0, source.ErrInvalidCursor
 	}
-	var ledger int64
-	if _, scanErr := fmt.Sscanf(ledgerStr, "%d", &ledger); scanErr != nil {
-		return "", 0, fmt.Errorf("invalid cursor")
+	ledger, parseErr := strconv.ParseInt(ledgerStr, 10, 64)
+	if parseErr != nil || ledger < 0 {
+		return "", 0, source.ErrInvalidCursor
+	}
+	return id, ledger, nil
+}
+
+// decodeContractCursor decodes an upstream contract-list cursor, which carries
+// the last contract ID and its LastLedger sort key ("<contract_id>|<last_ledger>").
+// Rejecting empty IDs, TOID-shaped event IDs, and non-positive ledgers ensures
+// that an event cursor or a cursor pasted from standalone mode (which encodes
+// "<last_ledger>|<contract_id>") fails cleanly with source.ErrInvalidCursor.
+func decodeContractCursor(cursor string) (afterID string, afterLedger int64, err error) {
+	id, ledger, err := decodeCursor(cursor)
+	if err != nil || id == "" || ledger <= 0 || strings.Contains(id, "-") {
+		return "", 0, source.ErrInvalidCursor
 	}
 	return id, ledger, nil
 }

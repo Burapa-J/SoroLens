@@ -31,6 +31,11 @@ import (
 // to a 404 without knowing which backend produced it.
 var ErrNotFound = errors.New("not found")
 
+// ErrInvalidCursor is returned when a pagination cursor cannot be decoded by
+// the active EventSource implementation (for example because it is malformed,
+// truncated, or came from the other operating mode).
+var ErrInvalidCursor = errors.New("invalid cursor")
+
 // Paging limits shared by every implementation, so a page size means the same
 // thing regardless of which backend serves it.
 const (
@@ -96,6 +101,9 @@ type EventQuery struct {
 type ContractQuery struct {
 	// Search matches contract IDs containing this substring, case-insensitive.
 	Search string
+	// Cursor continues a previous page. It is opaque: only the implementation
+	// that produced it may interpret it, and callers must pass it through
+	// unmodified.
 	Cursor string
 	Limit  int
 }

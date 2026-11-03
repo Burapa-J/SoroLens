@@ -47,44 +47,120 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "index", "Overview", indexData{Stats: stats, RecentFragment: fragment})
 }
 
-// contractsData backs the contracts list page.
+// contractsData backs the contracts list page and its table partial.
 type contractsData struct {
 	Contracts  []source.Contract
 	Search     string
+	Cursor     string
+	LimitParam string
 	NextCursor string
 	// NextURL is the ready-made link to the following page, so the template
 	// does not have to rebuild the query string.
 	NextURL string
+	// FirstURL links back to the first page while preserving any active search
+	// filter and custom page size.
+	FirstURL string
+	// MoreURL is the fragment URL for the next page, empty when exhausted.
+	MoreURL string
+	// CursorError explains why a requested cursor could not be decoded when the
+	// handler falls back to rendering the first page with HTTP 400.
+	CursorError string
 }
 
 func (s *Server) contracts(w http.ResponseWriter, r *http.Request) {
-	params := r.URL.Query()
-	q := source.ContractQuery{
-		Search: strings.TrimSpace(params.Get("search")),
-		Cursor: params.Get("cursor"),
+	q, err := contractQueryFromRequest(r)
+	if err != nil {
+		s.badRequest(w, r, err.Error())
+		return
 	}
 
-	page, err := s.src.ListContracts(r.Context(), q)
+	data, err := s.contractsFragmentFor(r, q)
 	if err != nil {
+		if isInvalidCursor(err) {
+			// A stale cursor or one pasted from the other operating mode must
+			// render a useful page with HTTP 400 rather than a 500 error page.
+			w.WriteHeader(http.StatusBadRequest)
+			fallbackQ := q
+			fallbackQ.Cursor = ""
+			fallback, fallbackErr := s.contractsFragmentFor(r, fallbackQ)
+			if fallbackErr == nil {
+				data = fallback
+			} else {
+				data = buildContractsLinks(q, r.URL.Query().Get("limit"), source.ContractPage{})
+				data.Cursor = ""
+			}
+			data.CursorError = "The pagination cursor could not be decoded (it may be stale or from another operating mode). Showing the first page instead."
+			s.render(w, r, "contracts", "Contracts", data)
+			return
+		}
 		s.fail(w, r, "listing contracts", err)
 		return
+	}
+
+	s.render(w, r, "contracts", "Contracts", data)
+}
+
+// partialContracts serves the contracts table fragment on its own.
+func (s *Server) partialContracts(w http.ResponseWriter, r *http.Request) {
+	q, err := contractQueryFromRequest(r)
+	if err != nil {
+		s.badRequest(w, r, err.Error())
+		return
+	}
+
+	data, err := s.contractsFragmentFor(r, q)
+	if err != nil {
+		if isInvalidCursor(err) {
+			s.badRequest(w, r, err.Error())
+			return
+		}
+		s.fail(w, r, "listing contracts", err)
+		return
+	}
+	s.renderPartial(w, "contracts-table", data)
+}
+
+func (s *Server) contractsFragmentFor(r *http.Request, q source.ContractQuery) (contractsData, error) {
+	page, err := s.src.ListContracts(r.Context(), q)
+	if err != nil {
+		return contractsData{}, err
+	}
+	return buildContractsLinks(q, strings.TrimSpace(r.URL.Query().Get("limit")), page), nil
+}
+
+func buildContractsLinks(q source.ContractQuery, limitParam string, page source.ContractPage) contractsData {
+	base := url.Values{}
+	if q.Search != "" {
+		base.Set("search", q.Search)
+	}
+	if limitParam != "" {
+		base.Set("limit", limitParam)
+	}
+
+	firstURL := "/contracts"
+	if encoded := base.Encode(); encoded != "" {
+		firstURL += "?" + encoded
 	}
 
 	data := contractsData{
 		Contracts:  page.Contracts,
 		Search:     q.Search,
+		Cursor:     q.Cursor,
+		LimitParam: limitParam,
 		NextCursor: page.NextCursor,
+		FirstURL:   firstURL,
 	}
 	if page.NextCursor != "" {
 		next := url.Values{}
-		if q.Search != "" {
-			next.Set("search", q.Search)
+		for k, v := range base {
+			next[k] = v
 		}
 		next.Set("cursor", page.NextCursor)
-		data.NextURL = "/contracts?" + next.Encode()
+		encoded := next.Encode()
+		data.NextURL = "/contracts?" + encoded
+		data.MoreURL = "/partials/contracts?" + encoded
 	}
-
-	s.render(w, r, "contracts", "Contracts", data)
+	return data
 }
 
 // contractData backs the contract detail page.

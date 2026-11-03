@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -26,20 +27,18 @@ type errorResponse struct {
 }
 
 func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
-	q := source.ContractQuery{
-		Search: r.URL.Query().Get("search"),
-		Cursor: r.URL.Query().Get("cursor"),
-	}
-
-	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	q, err := ContractQueryFromRequest(r)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	q.Limit = limit
 
 	page, err := s.src.ListContracts(r.Context(), q)
 	if err != nil {
+		if errors.Is(err, source.ErrInvalidCursor) {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
 		s.fail(w, r, "listing contracts", err)
 		return
 	}
@@ -55,6 +54,10 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	page, err := s.src.ListEvents(r.Context(), q)
 	if err != nil {
+		if errors.Is(err, source.ErrInvalidCursor) {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
 		s.fail(w, r, "listing events", err)
 		return
 	}
@@ -147,6 +150,24 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// ContractQueryFromRequest parses the contract list query parameters shared by
+// the JSON API and the web UI: search, cursor, limit. Exporting it keeps both
+// surfaces in lockstep on filter trimming and limit validation.
+func ContractQueryFromRequest(r *http.Request) (source.ContractQuery, error) {
+	params := r.URL.Query()
+	q := source.ContractQuery{
+		Search: strings.TrimSpace(params.Get("search")),
+		Cursor: params.Get("cursor"),
+	}
+
+	limit, err := parseLimit(params.Get("limit"))
+	if err != nil {
+		return q, err
+	}
+	q.Limit = limit
+	return q, nil
 }
 
 // EventQueryFromRequest parses the event filter query parameters shared by the

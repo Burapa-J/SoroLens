@@ -103,6 +103,12 @@ func TestListContracts(t *testing.T) {
 	// Query parameters must reach the source unchanged.
 	assert.Equal(t, "CDLZ", src.lastContractQuery.Search)
 	assert.Equal(t, 10, src.lastContractQuery.Limit)
+
+	t.Run("invalid cursor returns 400", func(t *testing.T) {
+		badSrc := &fakeSource{err: source.ErrInvalidCursor}
+		rec := do(t, testServer(badSrc), "/api/contracts?cursor=garbage")
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
 }
 
 func TestListEventsParsesFilters(t *testing.T) {

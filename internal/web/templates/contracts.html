@@ -3,48 +3,25 @@
 <h1>Contracts</h1>
 <p class="muted">Every contract this instance has events for, most recently active first.</p>
 
+{{if $d.CursorError}}
+<p class="banner bad" role="alert">
+  <b>Invalid cursor.</b> {{$d.CursorError}}
+  <a href="{{$d.FirstURL}}">Reset URL</a>.
+</p>
+{{end}}
+
 <form class="filters" action="/contracts" method="get">
+  {{if $d.LimitParam}}<input type="hidden" name="limit" value="{{$d.LimitParam}}">{{end}}
   <div>
     <label for="search">Filter by contract ID</label>
     <input id="search" type="text" name="search" value="{{$d.Search}}"
            placeholder="CDLZ…" size="32" autocomplete="off" spellcheck="false">
   </div>
   <button type="submit">Search</button>
-  {{if $d.Search}}<a href="/contracts">clear</a>{{end}}
+  {{if $d.Search}}<a href="/contracts{{if $d.LimitParam}}?limit={{$d.LimitParam}}{{end}}">clear</a>{{end}}
 </form>
 
-{{if $d.Contracts}}
-<div class="scroll">
-  <table>
-    <thead>
-      <tr>
-        <th>Contract</th>
-        <th>Events</th>
-        <th>First ledger</th>
-        <th>Last ledger</th>
-        <th>Last activity</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{range $d.Contracts}}
-      <tr>
-        <td><a class="mono" href="/contracts/{{.ID}}" title="{{.ID}}">{{shorten .ID 10}}</a></td>
-        <td class="num">{{.EventCount}}</td>
-        <td class="num">{{.FirstLedger}}</td>
-        <td class="num">{{.LastLedger}}</td>
-        <td>{{if .LastActivity.IsZero}}<span class="muted">unknown</span>{{else}}{{.LastActivity.UTC.Format "2006-01-02 15:04:05Z"}}{{end}}</td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
+<div id="contracts">
+  {{template "contracts-table" $d}}
 </div>
-
-{{if $d.NextURL}}<p><a href="{{$d.NextURL}}">Next page →</a></p>{{end}}
-
-{{else}}
-<div class="empty">
-  <p>No contracts to show{{if $d.Search}} for “{{$d.Search}}”{{end}}.</p>
-  <p class="muted">Standalone mode only sees contracts that emitted events while SoroLens was running.</p>
-</div>
-{{end}}
 {{end}}
