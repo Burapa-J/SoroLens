@@ -439,18 +439,25 @@ func TestStatusReportsHealth(t *testing.T) {
 
 		assert.Equal(t, "sorotrail", st.Mode)
 		assert.True(t, st.Healthy)
+		assert.Equal(t, source.StateHealthy, st.State)
 		assert.Equal(t, int64(1004), st.LatestLedger)
 		assert.NotEmpty(t, st.RetentionNote)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["sorotrail"])
 	})
 
 	t.Run("unreachable indexer is unhealthy, not an error", func(t *testing.T) {
 		f := newFakeIndexer(nil)
-		f.failWith = fmt.Errorf("connection refused")
+		f.failWith = fmt.Errorf("dial http://user:s3cret@indexer:8080: connection refused")
 		src := newTestSource(f)
 
 		st := src.Status(context.Background())
 		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateUnhealthy, st.State)
 		assert.Contains(t, st.Detail, "connection refused")
+		assert.NotContains(t, st.Detail, "s3cret")
+		assert.Equal(t, source.StateUnhealthy, st.Dependencies["sorotrail"].Status)
+		assert.NotContains(t, st.Dependencies["sorotrail"].Detail, "s3cret")
+		assert.Contains(t, st.Dependencies["sorotrail"].Detail, "http://user:redacted@indexer:8080")
 	})
 }
 

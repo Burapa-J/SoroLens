@@ -28,11 +28,17 @@ func (s *Server) ReadyzHandler() http.HandlerFunc {
 			"status": status.Healthy,
 			"mode":   status.Mode,
 		}
+		if status.State != "" {
+			out["state"] = status.State
+		}
 		if status.Detail != "" {
 			out["detail"] = status.Detail
 		}
 		if status.LatestLedger > 0 {
 			out["latest_ledger"] = status.LatestLedger
+		}
+		if len(status.Dependencies) > 0 {
+			out["dependencies"] = status.Dependencies
 		}
 		code := http.StatusOK
 		if !status.Healthy {

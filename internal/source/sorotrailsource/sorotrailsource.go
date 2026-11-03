@@ -28,10 +28,13 @@ const contractCacheTTL = 30 * time.Second
 // aggregating. It bounds both time and memory for the contracts page.
 const contractScanBudget = 5000
 
+const defaultCheckTimeout = 5 * time.Second
+
 // Source reads events from a SoroTrail indexer. It satisfies
 // source.EventSource and is safe for concurrent use.
 type Source struct {
-	api apiClient
+	api          apiClient
+	checkTimeout time.Duration
 
 	mu           sync.Mutex
 	cachedList   []source.Contract
@@ -42,7 +45,10 @@ type Source struct {
 // New returns an upstream-mode source reading from the SoroTrail instance at
 // baseURL. Pass nil for httpClient to use a sensible default.
 func New(baseURL string, httpClient *http.Client) *Source {
-	return &Source{api: newHTTPAPI(strings.TrimRight(baseURL, "/"), httpClient)}
+	return &Source{
+		api:          newHTTPAPI(strings.TrimRight(baseURL, "/"), httpClient),
+		checkTimeout: defaultCheckTimeout,
+	}
 }
 
 // ListEvents returns events newest first, reversing SoroTrail's ascending
@@ -298,30 +304,62 @@ func (s *Source) Stats(ctx context.Context) (source.Stats, error) {
 
 // Status reports the upstream indexer's health.
 func (s *Source) Status(ctx context.Context) source.Status {
+	timeout := s.checkTimeout
+	if timeout <= 0 {
+		timeout = defaultCheckTimeout
+	}
+
 	st := source.Status{
 		Mode:          "sorotrail",
 		Healthy:       true,
+		State:         source.StateHealthy,
 		RetentionNote: RetentionNote,
+		Dependencies:  make(map[string]source.DependencyStatus, 1),
 	}
 
-	health, err := s.api.Health(ctx)
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	health, err := s.api.Health(checkCtx)
 	if err != nil {
+		redacted := source.RedactSecrets(err.Error())
 		st.Healthy = false
-		st.Detail = "sorotrail unreachable: " + err.Error()
+		st.State = source.StateUnhealthy
+		st.Detail = "sorotrail unreachable: " + redacted
+		st.Dependencies["sorotrail"] = source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: redacted,
+		}
 		return st
 	}
 	if health.Status != "ok" {
 		st.Healthy = false
-		st.Detail = "sorotrail reports " + health.Status
-		for name, detail := range health.Checks {
-			if detail != "ok" {
-				st.Detail += "; " + name + ": " + detail
+		st.State = source.StateUnhealthy
+		detail := "sorotrail reports " + source.RedactSecrets(health.Status)
+		names := make([]string, 0, len(health.Checks))
+		for name := range health.Checks {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			checkDetail := health.Checks[name]
+			if checkDetail != "ok" {
+				detail += "; " + name + ": " + source.RedactSecrets(checkDetail)
 			}
+		}
+		st.Detail = detail
+		st.Dependencies["sorotrail"] = source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: detail,
 		}
 		return st
 	}
 
-	if stats, err := s.api.Stats(ctx); err == nil {
+	st.Dependencies["sorotrail"] = source.DependencyStatus{Status: source.StateHealthy}
+
+	statsCtx, statsCancel := context.WithTimeout(ctx, timeout)
+	defer statsCancel()
+	if stats, err := s.api.Stats(statsCtx); err == nil {
 		st.LatestLedger = stats.LastIngestedLedger
 	}
 	return st

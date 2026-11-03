@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,13 +57,19 @@ func (s *stubStore) GetIngestState(context.Context) (store.IngestState, error) {
 	return store.IngestState{}, nil
 }
 func (s *stubStore) SaveIngestState(context.Context, store.IngestState) error { return nil }
-func (s *stubStore) Ping(context.Context) error                               { return s.pingErr }
-func (s *stubStore) Close()                                                   {}
+func (s *stubStore) Ping(ctx context.Context) error {
+	if s.pingErr != nil {
+		return s.pingErr
+	}
+	return ctx.Err()
+}
+func (s *stubStore) Close() {}
 
 // stubRPC is a canned rpc.Client used only for status reporting here.
 type stubRPC struct {
-	health rpc.Health
-	err    error
+	health  rpc.Health
+	err     error
+	blockCh <-chan struct{}
 }
 
 func (s *stubRPC) GetEvents(context.Context, rpc.GetEventsRequest) (rpc.GetEventsResult, error) {
@@ -71,7 +78,16 @@ func (s *stubRPC) GetEvents(context.Context, rpc.GetEventsRequest) (rpc.GetEvent
 func (s *stubRPC) GetLatestLedger(context.Context) (rpc.LatestLedger, error) {
 	return rpc.LatestLedger{}, nil
 }
-func (s *stubRPC) GetHealth(context.Context) (rpc.Health, error) { return s.health, s.err }
+func (s *stubRPC) GetHealth(ctx context.Context) (rpc.Health, error) {
+	if s.blockCh != nil {
+		select {
+		case <-s.blockCh:
+		case <-ctx.Done():
+			return rpc.Health{}, ctx.Err()
+		}
+	}
+	return s.health, s.err
+}
 
 func healthyRPC() *stubRPC { return &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 900}} }
 
@@ -142,39 +158,120 @@ func TestGetEventNotFoundPassesThrough(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
-	t.Run("healthy reports the retention caveat", func(t *testing.T) {
+	t.Run("healthy reports the retention caveat and both dependencies healthy", func(t *testing.T) {
 		src := New(&stubStore{}, healthyRPC())
 		st := src.Status(context.Background())
 
 		assert.Equal(t, "rpc", st.Mode)
 		assert.True(t, st.Healthy)
+		assert.Equal(t, source.StateHealthy, st.State)
 		assert.Equal(t, int64(900), st.LatestLedger)
 		assert.Contains(t, st.RetentionNote, "only while SoroLens is running",
 			"the capture-window caveat must always be surfaced")
+		require.Len(t, st.Dependencies, 2)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["rpc"])
 	})
 
-	t.Run("a database failure is unhealthy, not an error", func(t *testing.T) {
+	t.Run("a database failure is unhealthy and still reports rpc status", func(t *testing.T) {
 		src := New(&stubStore{pingErr: errors.New("connection refused")}, healthyRPC())
 		st := src.Status(context.Background())
 
 		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateUnhealthy, st.State)
 		assert.Contains(t, st.Detail, "database unreachable")
+		assert.Equal(t, int64(900), st.LatestLedger)
+		require.Len(t, st.Dependencies, 2)
+		assert.Equal(t, source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: "connection refused",
+		}, st.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["rpc"])
 	})
 
-	t.Run("an unreachable node is unhealthy", func(t *testing.T) {
+	t.Run("an unreachable node with healthy postgres is degraded", func(t *testing.T) {
 		src := New(&stubStore{}, &stubRPC{err: errors.New("timeout")})
 		st := src.Status(context.Background())
 
 		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateDegraded, st.State)
 		assert.Contains(t, st.Detail, "stellar rpc unreachable")
+		require.Len(t, st.Dependencies, 2)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: "timeout",
+		}, st.Dependencies["rpc"])
 	})
 
-	t.Run("a degraded node is unhealthy", func(t *testing.T) {
+	t.Run("a syncing node with healthy postgres is degraded", func(t *testing.T) {
 		src := New(&stubStore{}, &stubRPC{health: rpc.Health{Status: "syncing"}})
 		st := src.Status(context.Background())
 
 		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateDegraded, st.State)
 		assert.Contains(t, st.Detail, "syncing")
+		require.Len(t, st.Dependencies, 2)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["postgres"])
+		assert.Equal(t, source.StateUnhealthy, st.Dependencies["rpc"].Status)
+		assert.Contains(t, st.Dependencies["rpc"].Detail, "syncing")
+	})
+
+	t.Run("both dependencies failing reports both in dependencies and detail", func(t *testing.T) {
+		src := New(
+			&stubStore{pingErr: errors.New("connection refused")},
+			&stubRPC{err: errors.New("rpc dial timeout")},
+		)
+		st := src.Status(context.Background())
+
+		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateUnhealthy, st.State)
+		assert.Contains(t, st.Detail, "database unreachable: connection refused")
+		assert.Contains(t, st.Detail, "stellar rpc unreachable: rpc dial timeout")
+		require.Len(t, st.Dependencies, 2)
+		assert.Equal(t, source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: "connection refused",
+		}, st.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{
+			Status: source.StateUnhealthy,
+			Detail: "rpc dial timeout",
+		}, st.Dependencies["rpc"])
+	})
+
+	t.Run("DSN credentials and passwords are redacted from status details", func(t *testing.T) {
+		src := New(
+			&stubStore{pingErr: errors.New("dial postgres://sorolens:s3cr3tPass!@db.internal:5432/sorolens?sslmode=disable: connection refused")},
+			&stubRPC{err: errors.New("Get \"https://api:topSecretToken@rpc.example.com\": password=myKvSecret")},
+		)
+		st := src.Status(context.Background())
+
+		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateUnhealthy, st.State)
+		assert.NotContains(t, st.Detail, "s3cr3tPass!")
+		assert.NotContains(t, st.Detail, "topSecretToken")
+		assert.NotContains(t, st.Detail, "myKvSecret")
+		assert.NotContains(t, st.Dependencies["postgres"].Detail, "s3cr3tPass!")
+		assert.Contains(t, st.Dependencies["postgres"].Detail, "postgres://sorolens:redacted@db.internal:5432")
+		assert.NotContains(t, st.Dependencies["rpc"].Detail, "topSecretToken")
+		assert.NotContains(t, st.Dependencies["rpc"].Detail, "myKvSecret")
+		assert.Contains(t, st.Dependencies["rpc"].Detail, "https://api:redacted@rpc.example.com")
+		assert.Contains(t, st.Dependencies["rpc"].Detail, "password=redacted")
+	})
+
+	t.Run("a hung check times out within the per-check bound without hiding the other dependency", func(t *testing.T) {
+		blockCh := make(chan struct{})
+		defer close(blockCh)
+
+		src := New(&stubStore{}, &stubRPC{blockCh: blockCh})
+		src.checkTimeout = 25 * time.Millisecond
+
+		st := src.Status(context.Background())
+		assert.False(t, st.Healthy)
+		assert.Equal(t, source.StateDegraded, st.State)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, st.Dependencies["postgres"])
+		assert.Equal(t, source.StateUnhealthy, st.Dependencies["rpc"].Status)
+		assert.Contains(t, st.Dependencies["rpc"].Detail, "context deadline exceeded")
 	})
 }
 

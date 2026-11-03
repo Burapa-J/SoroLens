@@ -10,11 +10,15 @@ package rpcsource
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/sorotrail/sorolens/internal/rpc"
 	"github.com/sorotrail/sorolens/internal/source"
 	"github.com/sorotrail/sorolens/internal/store"
 )
+
+const defaultCheckTimeout = 5 * time.Second
 
 // RetentionNote explains standalone mode's central limitation. Stellar RPC
 // keeps contract events for roughly 24 hours to 7 days, so an instance can
@@ -27,14 +31,19 @@ const RetentionNote = "Standalone mode captures events only while SoroLens is ru
 
 // Source reads stored events. It satisfies source.EventSource.
 type Source struct {
-	store store.Store
-	rpc   rpc.Client
+	store        store.Store
+	rpc          rpc.Client
+	checkTimeout time.Duration
 }
 
 // New returns a standalone-mode source. rpcClient is used only for status
 // reporting; all reads come from the store.
 func New(st store.Store, rpcClient rpc.Client) *Source {
-	return &Source{store: st, rpc: rpcClient}
+	return &Source{
+		store:        st,
+		rpc:          rpcClient,
+		checkTimeout: defaultCheckTimeout,
+	}
 }
 
 // ListContracts returns contracts ordered by most recent activity.
@@ -72,30 +81,101 @@ func (s *Source) Stats(ctx context.Context) (source.Stats, error) {
 
 // Status reports database and RPC health. It never returns an error: an
 // unreachable dependency becomes an unhealthy Status so the UI can always
-// render its banner.
+// render its banner. Both dependencies are checked concurrently with bounded
+// timeouts so a failing or hung check never hides the other dependency's state.
 func (s *Source) Status(ctx context.Context) source.Status {
+	timeout := s.checkTimeout
+	if timeout <= 0 {
+		timeout = defaultCheckTimeout
+	}
+
+	var (
+		wg           sync.WaitGroup
+		pgDep        source.DependencyStatus
+		pgSummary    string
+		rpcDep       source.DependencyStatus
+		rpcSummary   string
+		latestLedger int64
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		pgCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		if err := s.store.Ping(pgCtx); err != nil {
+			redacted := source.RedactSecrets(err.Error())
+			pgDep = source.DependencyStatus{
+				Status: source.StateUnhealthy,
+				Detail: redacted,
+			}
+			pgSummary = fmt.Sprintf("database unreachable: %s", redacted)
+			return
+		}
+		pgDep = source.DependencyStatus{Status: source.StateHealthy}
+	}()
+
+	go func() {
+		defer wg.Done()
+		rpcCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		health, err := s.rpc.GetHealth(rpcCtx)
+		switch {
+		case err != nil:
+			redacted := source.RedactSecrets(err.Error())
+			rpcDep = source.DependencyStatus{
+				Status: source.StateUnhealthy,
+				Detail: redacted,
+			}
+			rpcSummary = fmt.Sprintf("stellar rpc unreachable: %s", redacted)
+		case health.Status != "healthy":
+			redacted := source.RedactSecrets(health.Status)
+			rpcDep = source.DependencyStatus{
+				Status: source.StateUnhealthy,
+				Detail: fmt.Sprintf("stellar rpc reports %q", redacted),
+			}
+			rpcSummary = fmt.Sprintf("stellar rpc reports %q", redacted)
+		default:
+			rpcDep = source.DependencyStatus{Status: source.StateHealthy}
+			latestLedger = int64(health.LatestLedger)
+		}
+	}()
+	wg.Wait()
+
 	st := source.Status{
 		Mode:          string(sourceModeRPC),
 		Healthy:       true,
+		State:         source.StateHealthy,
+		LatestLedger:  latestLedger,
 		RetentionNote: RetentionNote,
+		Dependencies: map[string]source.DependencyStatus{
+			"postgres": pgDep,
+			"rpc":      rpcDep,
+		},
 	}
 
-	if err := s.store.Ping(ctx); err != nil {
-		st.Healthy = false
-		st.Detail = fmt.Sprintf("database unreachable: %v", err)
-		return st
-	}
+	pgOK := pgDep.Status == source.StateHealthy
+	rpcOK := rpcDep.Status == source.StateHealthy
 
-	health, err := s.rpc.GetHealth(ctx)
 	switch {
-	case err != nil:
+	case pgOK && rpcOK:
+		return st
+	case pgOK && !rpcOK:
+		// Stored history remains readable from Postgres while live ingestion
+		// from Stellar RPC is impaired.
 		st.Healthy = false
-		st.Detail = fmt.Sprintf("stellar rpc unreachable: %v", err)
-	case health.Status != "healthy":
+		st.State = source.StateDegraded
+		st.Detail = rpcSummary
+	case !pgOK && rpcOK:
 		st.Healthy = false
-		st.Detail = fmt.Sprintf("stellar rpc reports %q", health.Status)
+		st.State = source.StateUnhealthy
+		st.Detail = pgSummary
 	default:
-		st.LatestLedger = int64(health.LatestLedger)
+		st.Healthy = false
+		st.State = source.StateUnhealthy
+		st.Detail = pgSummary + "; " + rpcSummary
 	}
 	return st
 }

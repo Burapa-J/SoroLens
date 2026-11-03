@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"time"
 )
 
@@ -145,6 +146,23 @@ type ContractStats struct {
 	Approximate   bool        `json:"approximate"`
 }
 
+// Health state values reported on Status.State and DependencyStatus.Status.
+const (
+	StateHealthy   = "healthy"
+	StateDegraded  = "degraded"
+	StateUnhealthy = "unhealthy"
+)
+
+// DependencyStatus describes the health of one individual dependency checked
+// during Status().
+type DependencyStatus struct {
+	// Status is "healthy" or "unhealthy".
+	Status string `json:"status"`
+	// Detail carries a redacted failure reason or upstream status note when
+	// Status is not "healthy".
+	Detail string `json:"detail,omitempty"`
+}
+
 // Status describes a source's health and the extent of the history it holds.
 // The UI shows this prominently: standalone mode only sees events emitted
 // while it was running, which surprises people who expect a full explorer.
@@ -153,6 +171,10 @@ type Status struct {
 	Mode string `json:"mode"`
 	// Healthy is false when the backend is unreachable or degraded.
 	Healthy bool `json:"healthy"`
+	// State distinguishes a fully working deployment ("healthy") from one that
+	// can still serve stored history while ingestion is impaired ("degraded")
+	// or one whose primary store/upstream is down ("unhealthy").
+	State string `json:"state,omitempty"`
 	// Detail explains an unhealthy status, or adds context to a healthy one.
 	Detail string `json:"detail,omitempty"`
 	// LatestLedger is the newest ledger the backend knows about, if known.
@@ -160,6 +182,25 @@ type Status struct {
 	// RetentionNote is a human-readable caveat about history coverage, shown
 	// in the UI banner.
 	RetentionNote string `json:"retention_note,omitempty"`
+	// Dependencies reports per-dependency health so operators and alerts can
+	// tell which subsystem failed without scraping logs.
+	Dependencies map[string]DependencyStatus `json:"dependencies,omitempty"`
+}
+
+var (
+	urlUserinfoPasswordPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^/:@\s]+):([^@\s]+)@`)
+	kvPasswordPattern          = regexp.MustCompile(`(?i)\b(password|passwd|pwd)=([^\s'"]+|'[^']*'|"[^"]*")`)
+)
+
+// RedactSecrets strips credentials from connection strings and error messages
+// before they are surfaced on public health endpoints.
+func RedactSecrets(s string) string {
+	if s == "" {
+		return ""
+	}
+	redacted := urlUserinfoPasswordPattern.ReplaceAllString(s, "${1}:redacted@")
+	redacted = kvPasswordPattern.ReplaceAllString(redacted, "${1}=redacted")
+	return redacted
 }
 
 // EventSource is the read-only interface every backend implements. All methods

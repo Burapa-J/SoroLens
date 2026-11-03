@@ -34,3 +34,38 @@ If you do run standalone mode, the same continuity consideration applies as any 
 1. (Standalone only) back up the database.
 2. Pull the new version, run migrations if standalone, restart.
 3. Verify `GET /health` reports the expected source mode and reachability.
+
+## Health & Readiness Probes
+
+SoroLens exposes three health endpoints at the root path:
+
+- `GET /livez` — process liveness probe (`200 OK`, `{"status": "alive"}`). Checks no external dependencies so a transient Postgres or Stellar RPC outage never causes an orchestrator restart loop.
+- `GET /readyz` — readiness probe (`200 OK` when `healthy` is `true`, `503 Service Unavailable` otherwise). Reports `mode`, `state`, `detail`, `latest_ledger`, and per-dependency status in `dependencies`.
+- `GET /health` — full source health report (`200 OK` when `healthy` is `true`, `503 Service Unavailable` otherwise). Serializes `source.Status` including `state`, `dependencies`, `detail`, `latest_ledger`, and `retention_note`.
+
+Example `GET /health` response in standalone mode (`SOURCE_MODE=rpc`) when Stellar RPC is unreachable while Postgres remains up:
+
+```json
+{
+  "mode": "rpc",
+  "healthy": false,
+  "state": "degraded",
+  "detail": "stellar rpc unreachable: context deadline exceeded",
+  "retention_note": "Standalone mode captures events only while SoroLens is running...",
+  "dependencies": {
+    "postgres": {
+      "status": "healthy"
+    },
+    "rpc": {
+      "status": "unhealthy",
+      "detail": "context deadline exceeded"
+    }
+  }
+}
+```
+
+### Alerting on `state` and `dependencies`
+
+- `state: "healthy"` — all dependencies (`postgres` and `rpc` in standalone mode, `sorotrail` in upstream mode) are reachable and healthy.
+- `state: "degraded"` — standalone mode can still serve stored event history from `postgres`, but live ingestion from `rpc` is failing or syncing. Page or warn on `dependencies.rpc` without treating stored-history reads as down.
+- `state: "unhealthy"` — the primary data store (`postgres` in standalone mode or `sorotrail` in upstream mode) is unreachable. Any connection-string credentials in error details are automatically redacted before serialization.

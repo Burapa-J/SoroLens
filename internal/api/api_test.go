@@ -241,8 +241,17 @@ func TestContractStats(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	t.Run("healthy is 200", func(t *testing.T) {
-		src := &fakeSource{status: source.Status{Mode: "rpc", Healthy: true, LatestLedger: 500}}
+	t.Run("healthy is 200 with state and dependencies", func(t *testing.T) {
+		src := &fakeSource{status: source.Status{
+			Mode:         "rpc",
+			Healthy:      true,
+			State:        source.StateHealthy,
+			LatestLedger: 500,
+			Dependencies: map[string]source.DependencyStatus{
+				"postgres": {Status: source.StateHealthy},
+				"rpc":      {Status: source.StateHealthy},
+			},
+		}}
 		rec := do(t, testServer(src), "/health")
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -251,14 +260,33 @@ func TestHealth(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 		assert.True(t, got.Healthy)
 		assert.Equal(t, "rpc", got.Mode)
+		assert.Equal(t, source.StateHealthy, got.State)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, got.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, got.Dependencies["rpc"])
 	})
 
-	t.Run("unhealthy is 503 so probes fail", func(t *testing.T) {
-		src := &fakeSource{status: source.Status{Mode: "rpc", Healthy: false, Detail: "database unreachable"}}
+	t.Run("unhealthy is 503 so probes fail and exposes per-dependency status", func(t *testing.T) {
+		src := &fakeSource{status: source.Status{
+			Mode:    "rpc",
+			Healthy: false,
+			State:   source.StateDegraded,
+			Detail:  "stellar rpc unreachable: timeout",
+			Dependencies: map[string]source.DependencyStatus{
+				"postgres": {Status: source.StateHealthy},
+				"rpc":      {Status: source.StateUnhealthy, Detail: "timeout"},
+			},
+		}}
 		rec := do(t, testServer(src), "/health")
 
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-		assert.Contains(t, rec.Body.String(), "database unreachable")
+		assert.Contains(t, rec.Body.String(), "stellar rpc unreachable")
+
+		var got source.Status
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.False(t, got.Healthy)
+		assert.Equal(t, source.StateDegraded, got.State)
+		assert.Equal(t, source.DependencyStatus{Status: source.StateHealthy}, got.Dependencies["postgres"])
+		assert.Equal(t, source.DependencyStatus{Status: source.StateUnhealthy, Detail: "timeout"}, got.Dependencies["rpc"])
 	})
 }
 
